@@ -116,7 +116,8 @@ fn main() {
     }
 
     if env::var("WHISPER_DONT_GENERATE_BINDINGS").is_ok() {
-        let _: u64 = std::fs::copy("src/bindings.rs", out.join("bindings.rs"))
+        let bindings_src = pick_bundled_bindings();
+        let _: u64 = std::fs::copy(bindings_src, out.join("bindings.rs"))
             .expect("Failed to copy bindings.rs");
     } else {
         let mut bindings = bindgen::Builder::default().header("wrapper.h");
@@ -136,20 +137,35 @@ fn main() {
             .clang_arg("-I./whisper.cpp/")
             .clang_arg("-I./whisper.cpp/include")
             .clang_arg("-I./whisper.cpp/ggml/include")
+            .clang_arg(format!("--target={}", target))
+            .layout_tests(false)
             .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
             .generate();
 
         match bindings {
             Ok(b) => {
                 let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
-                b.write_to_file(out_path.join("bindings.rs"))
+                let bindings_path = out_path.join("bindings.rs");
+                b.write_to_file(&bindings_path)
                     .expect("Couldn't write bindings!");
+                // Validate that whisper_full_params was generated as a real struct, not opaque
+                let content = std::fs::read_to_string(&bindings_path).unwrap_or_default();
+                if content.contains("pub struct whisper_full_params")
+                    && !content.contains("pub struct whisper_full_params {\n    pub _address: u8,\n}")
+                {
+                    // Bindings look good
+                } else {
+                    println!("cargo:warning=Generated bindings have opaque whisper_full_params, using bundled bindings");
+                    let bindings_src = pick_bundled_bindings();
+                    std::fs::copy(bindings_src, &bindings_path)
+                        .expect("Unable to copy bundled bindings.rs");
+                }
             }
             Err(e) => {
                 println!("cargo:warning=Unable to generate bindings: {}", e);
                 println!("cargo:warning=Using bundled bindings.rs, which may be out of date");
-                // copy src/bindings.rs to OUT_DIR
-                std::fs::copy("src/bindings.rs", out.join("bindings.rs"))
+                let bindings_src = pick_bundled_bindings();
+                std::fs::copy(bindings_src, out.join("bindings.rs"))
                     .expect("Unable to copy bindings.rs");
             }
         }
@@ -369,4 +385,12 @@ fn get_whisper_cpp_version(whisper_root: &std::path::Path) -> std::io::Result<Op
     }
 
     Ok(None)
+}
+
+fn pick_bundled_bindings() -> &'static str {
+    if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
+        "src/bindings_windows_aarch64.rs"
+    } else {
+        "src/bindings.rs"
+    }
 }
